@@ -24,9 +24,17 @@ package is present nothing runs unless explicitly enabled.
 
 ```jsonc
 // composer.json (agent: require-dev / demo app: require)
-"repositories": [{ "type": "path", "url": "../nightowl-agent-simulator" }],
-"require-dev": { "nightowl/agent-simulator": "@dev" }
+"repositories": [
+  { "type": "vcs", "url": "https://github.com/lemed99/nightowl-agent-simulator" }
+],
+"require-dev": { "nightowl/agent-simulator": "^0.1" }
 ```
+
+Pinned to the tagged release so it resolves in standalone CI / deploy without a
+monorepo sibling checkout. For active local development of the simulator, add a
+`{ "type": "path", "url": "../nightowl-agent-simulator" }` repository **above** the
+VCS one and switch the constraint to `@dev` (the path repo is canonical, so it wins
+locally; drop it again before committing the lock).
 
 ## License
 
