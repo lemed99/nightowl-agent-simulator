@@ -1,0 +1,29 @@
+{
+    "name": "nightowl/agent-simulator",
+    "description": "Synthetic Nightwatch-shaped telemetry generator + feeder commands for the NightOwl Tier-1 demo and the agent's own pipeline tests. NOT installed into customer agents — it is a require-dev of nightowl/agent (for its Integration/System tests) and a require of the demo app only.",
+    "keywords": ["nightowl", "simulator", "telemetry", "demo", "testing"],
+    "license": "MIT",
+    "type": "library",
+    "require": {
+        "php": "^8.2",
+        "illuminate/console": "^11.0|^12.0|^13.0",
+        "illuminate/support": "^11.0|^12.0|^13.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "NightOwl\\Simulator\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "NightOwl\\Simulator\\SimulatorServiceProvider"
+            ]
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
