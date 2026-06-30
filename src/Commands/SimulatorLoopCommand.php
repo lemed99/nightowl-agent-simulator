@@ -44,6 +44,7 @@ class SimulatorLoopCommand extends Command
         $baseDelayMs = max(0, (int) ($this->option('delay-ms') ?: getenv('NIGHTOWL_SIMULATOR_DELAY_MS') ?: 0));
 
         $simulator = new NightwatchSimulator($token, $host, $port);
+        $simulator->errorRate = max(0.0, (float) (getenv('NIGHTOWL_SIMULATOR_ERROR_RATE') ?: 0.6));
 
         $this->installSignalHandlers();
 
@@ -72,20 +73,18 @@ class SimulatorLoopCommand extends Command
     }
 
     /**
-     * Vary the inter-tick delay around the target average so the dashboards show a
-     * natural traffic curve, not a flat line: a diurnal swing (quiet overnight, busy
-     * mid-afternoon) × sub-hourly swells + ripples × per-tick noise. The factors
-     * average ~1, so overall volume still tracks $baseDelayMs.
+     * Vary the inter-tick delay so the dashboards show a real app's week, not a flat
+     * line or a repeated stamp. Volume follows the shared traffic curve (diurnal +
+     * per-day variation + weekend dips) with a little per-tick noise so spacing isn't
+     * mechanical. Higher weight = busier = shorter delay; the curve averages ~1 so
+     * overall volume still tracks $baseDelayMs.
      */
     private function shapedDelayMs(int $baseDelayMs): float
     {
-        $now = microtime(true);
-        $hourFrac = ((int) date('G')) + ((int) date('i')) / 60.0;       // 0..24, local
-        $daily = 1.0 + 0.6 * sin(2 * M_PI * ($hourFrac - 8.0) / 24.0);  // peak ~14:00, trough ~02:00
-        $wave = 1.0 + 0.30 * sin(2 * M_PI * $now / (37 * 60))           // ~37-min swells
-                    + 0.15 * sin(2 * M_PI * $now / (8 * 60));           // ~8-min ripples
-        $noise = 0.70 + mt_rand(0, 600) / 1000.0;                       // 0.70..1.30 jitter
-        $rate = max(0.18, min(3.5, $daily * $wave * $noise));          // higher = busier = shorter delay
+        $weight = NightwatchSimulator::trafficWeight(microtime(true));
+        $noise = 0.80 + mt_rand(0, 400) / 1000.0;            // 0.80..1.20 jitter
+        $rate = max(0.12, min(3.2, $weight * $noise));       // higher = busier = shorter delay
+
         return $baseDelayMs / $rate;
     }
 

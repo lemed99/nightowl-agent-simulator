@@ -42,6 +42,14 @@ final class NightwatchSimulator
      */
     private float $clockOffsetSeconds = 0.0;
 
+    /**
+     * Percent (0..100) of realistic-tick events that carry an exception — a failing
+     * request or a failed job. Tunable per feeder (NIGHTOWL_SIMULATOR_ERROR_RATE) so
+     * the demo's apps read as healthy / degraded / on-fire instead of all on fire.
+     * ~0.6 ≈ a healthy app with the occasional error.
+     */
+    public float $errorRate = 0.6;
+
     public function __construct(
         string $token,
         string $host = '127.0.0.1',
@@ -72,6 +80,45 @@ final class NightwatchSimulator
     public function setClockOffset(float $seconds): void
     {
         $this->clockOffsetSeconds = max(0.0, $seconds);
+    }
+
+    // ─── Traffic shape ─────────────────────────────────────────
+
+    /**
+     * Deterministic per-calendar-day pseudo-random in [0,1) — stable for a given
+     * (day, seed), so the live loop and the backfill agree on a day's character.
+     */
+    private static function dayRand(int $dayIndex, float $seed): float
+    {
+        $v = sin($dayIndex * 12.9898 + $seed * 78.233) * 43758.5453;
+
+        return $v - floor($v);
+    }
+
+    /**
+     * A traffic-intensity multiplier (~0.1 .. ~2.9, averaging ~1) for an epoch time.
+     * Layers a daily curve with DETERMINISTIC per-day variation — each calendar day
+     * gets its own overall level, peak hour, and amplitude — plus weekend dips and a
+     * sub-hourly swell. Shared by the live loop (delay = base / weight) and the
+     * backfill (rejection sampling) so synthetic traffic reads like a real app's week
+     * (non-identical day to day, quieter weekends) instead of a repeated sine stamp.
+     */
+    public static function trafficWeight(float $t): float
+    {
+        $ti = (int) $t;
+        $dayIndex = (int) floor($t / 86400.0);
+        $dow = (int) date('N', $ti);                                    // 1=Mon .. 7=Sun
+        $hourFrac = ((int) date('G', $ti)) + ((int) date('i', $ti)) / 60.0;
+
+        $dayLevel = 0.60 + 0.85 * self::dayRand($dayIndex, 1.7);        // overall height 0.60..1.45
+        $peakHour = 13.5 + 5.0 * (self::dayRand($dayIndex, 5.3) - 0.5); // peak hour 11.0..16.0
+        $amp = 0.45 + 0.30 * self::dayRand($dayIndex, 9.1);             // diurnal depth 0.45..0.75
+
+        $daily = 1.0 + $amp * sin(2 * M_PI * ($hourFrac - $peakHour + 6.0) / 24.0);
+        $weekend = $dow >= 6 ? 0.62 : 1.0;                              // quieter Sat/Sun
+        $swell = 1.0 + 0.16 * sin(2 * M_PI * $t / (43.0 * 60.0));       // ~43-min swell
+
+        return max(0.10, $dayLevel * $weekend * $daily * $swell);
     }
 
     // ─── Sending ───────────────────────────────────────────────
@@ -506,16 +553,24 @@ final class NightwatchSimulator
      */
     public function realisticTick(bool $sleep = true): void
     {
-        $roll = mt_rand(1, 100);
-        match (true) {
-            $roll <= 60 => $this->simulateRequest(),
-            $roll <= 75 => $this->simulateJob(),
-            $roll <= 85 => $this->simulateCommand(),
-            $roll <= 90 => $this->simulateScheduledTask(),
-            $roll <= 95 => $this->simulateErrorRequest(),
-            $roll <= 98 => $this->simulateJob('released'),
-            default => $this->simulateJob('failed'),
-        };
+        // Error budget for this tick (percent, per-app tunable). Most errors are
+        // failing requests, a minority failed jobs; everything else is a healthy mix
+        // with no exception. Keeps a healthy app from reading as on-fire.
+        if (mt_rand(1, 10000) / 100.0 <= $this->errorRate) {
+            if (mt_rand(1, 4) === 1) {
+                $this->simulateJob('failed');
+            } else {
+                $this->simulateErrorRequest();
+            }
+        } else {
+            $roll = mt_rand(1, 100);
+            match (true) {
+                $roll <= 68 => $this->simulateRequest(),
+                $roll <= 84 => $this->simulateJob(),
+                $roll <= 93 => $this->simulateCommand(),
+                default => $this->simulateScheduledTask(),
+            };
+        }
 
         // Occasional STANDALONE mail/notification/outgoing — these have NO parent
         // execution (queued mail, scheduler notifications, etc.). Null the execution

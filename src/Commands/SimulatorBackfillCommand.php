@@ -42,6 +42,7 @@ class SimulatorBackfillCommand extends Command
         $windowSeconds = $hours * 3600;
 
         $simulator = new NightwatchSimulator($token, $host, $port);
+        $simulator->errorRate = max(0.0, (float) (getenv('NIGHTOWL_SIMULATOR_ERROR_RATE') ?: 0.6));
 
         $this->info("Backfilling {$events} event clusters across the last {$hours}h → tcp://{$host}:{$port} …");
 
@@ -75,21 +76,18 @@ class SimulatorBackfillCommand extends Command
     }
 
     /**
-     * Pick a backdated offset weighted toward busy hours (diurnal curve × sub-hourly
-     * swell) via rejection sampling, so the backfilled events form a natural daily
-     * curve rather than a flat uniform scatter.
+     * Rejection-sample a backdated offset weighted by the shared traffic curve, so the
+     * backfilled week carries the same per-day variation + weekend dips as the live
+     * feed (not a flat scatter and not identical daily humps). $wMax bounds the curve's
+     * peak, so the accept probability is weight / wMax.
      */
     private function shapedOffset(int $windowSeconds): float
     {
         $now = microtime(true);
-        for ($try = 0; $try < 24; $try++) {
+        $wMax = 3.0;
+        for ($try = 0; $try < 32; $try++) {
             $off = (float) mt_rand(0, $windowSeconds);
-            $t = $now - $off;
-            $hourFrac = ((int) date('G', (int) $t)) + ((int) date('i', (int) $t)) / 60.0;
-            $daily = 0.5 + 0.5 * sin(2 * M_PI * ($hourFrac - 8.0) / 24.0);   // 0..1, peak ~14:00
-            $sub = 0.75 + 0.25 * sin(2 * M_PI * $t / (40 * 60));            // 0.5..1, ~40-min swell
-            $weight = 0.15 + 0.85 * $daily * $sub;                         // 0.15..1
-            if (mt_rand(0, 1000) / 1000.0 <= $weight) {
+            if (mt_rand(0, 1000) / 1000.0 <= NightwatchSimulator::trafficWeight($now - $off) / $wMax) {
                 return $off;
             }
         }
