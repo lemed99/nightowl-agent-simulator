@@ -229,7 +229,7 @@ final class NightwatchSimulator
     {
         $traceId = $this->uuid();
         $now = $this->now();
-        $userId = 'user_'.mt_rand(1, 50);
+        $userId = mt_rand(1, 4) === 1 ? null : 'user_'.mt_rand(1, 50);
 
         $records = [];
 
@@ -290,8 +290,10 @@ final class NightwatchSimulator
             ]);
         }
 
-        // User record
-        $records[] = $this->makeUser($userId);
+        // User record — guests (null user) don't have one.
+        if ($userId !== null) {
+            $records[] = $this->makeUser($userId);
+        }
 
         return $this->send($records);
     }
@@ -303,7 +305,7 @@ final class NightwatchSimulator
     {
         $traceId = $this->uuid();
         $now = $this->now();
-        $userId = 'user_'.mt_rand(1, 50);
+        $userId = mt_rand(1, 4) === 1 ? null : 'user_'.mt_rand(1, 50);
 
         $records = [];
 
@@ -371,7 +373,7 @@ final class NightwatchSimulator
     {
         $traceId = $this->uuid();
         $now = $this->now();
-        $userId = 'user_'.mt_rand(1, 50);
+        $userId = mt_rand(1, 4) === 1 ? null : 'user_'.mt_rand(1, 50);
         $jobId = $this->uuid();
         $attemptId = $this->uuid();
 
