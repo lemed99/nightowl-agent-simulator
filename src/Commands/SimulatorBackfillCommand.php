@@ -49,9 +49,10 @@ class SimulatorBackfillCommand extends Command
         $bar->start();
 
         for ($i = 0; $i < $events; $i++) {
-            // Random backdate within the window → jittered scatter (no inter-event
-            // sleep: this is a bulk fill, not live traffic).
-            $simulator->setClockOffset((float) mt_rand(0, $windowSeconds));
+            // Diurnal-weighted backdate (no inter-event sleep — bulk fill): events
+            // cluster toward busy hours so the backfilled chart shows a natural daily
+            // curve, matching the live loop's shape instead of a flat scatter.
+            $simulator->setClockOffset($this->shapedOffset($windowSeconds));
             $simulator->realisticTick(false);
             $bar->advance();
         }
@@ -71,5 +72,28 @@ class SimulatorBackfillCommand extends Command
         $this->info("Backfill done: sent {$stats['sent']}, failed {$stats['failed']}, ".number_format($stats['bytes']).' bytes.');
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Pick a backdated offset weighted toward busy hours (diurnal curve × sub-hourly
+     * swell) via rejection sampling, so the backfilled events form a natural daily
+     * curve rather than a flat uniform scatter.
+     */
+    private function shapedOffset(int $windowSeconds): float
+    {
+        $now = microtime(true);
+        for ($try = 0; $try < 24; $try++) {
+            $off = (float) mt_rand(0, $windowSeconds);
+            $t = $now - $off;
+            $hourFrac = ((int) date('G', (int) $t)) + ((int) date('i', (int) $t)) / 60.0;
+            $daily = 0.5 + 0.5 * sin(2 * M_PI * ($hourFrac - 8.0) / 24.0);   // 0..1, peak ~14:00
+            $sub = 0.75 + 0.25 * sin(2 * M_PI * $t / (40 * 60));            // 0.5..1, ~40-min swell
+            $weight = 0.15 + 0.85 * $daily * $sub;                         // 0.15..1
+            if (mt_rand(0, 1000) / 1000.0 <= $weight) {
+                return $off;
+            }
+        }
+
+        return (float) mt_rand(0, $windowSeconds);
     }
 }
