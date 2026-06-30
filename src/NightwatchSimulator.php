@@ -191,6 +191,35 @@ final class NightwatchSimulator
         return $this->stats;
     }
 
+    /**
+     * Build a closure that hands out child-event timestamps spread across the busy
+     * (controller/handler) window of a parent execution, so a request/job waterfall
+     * staggers queries/caches along the timeline instead of stacking them at t=0.
+     * Uses the request phase fields (bootstrap/middleware/action µs) when present, else
+     * a generic slice of the total duration. The dashboard sorts the timeline by
+     * timestamp, so random instants in the window interleave the child types naturally.
+     *
+     * @param  array<string, mixed>  $parent  the parent request / job-attempt / command record
+     */
+    private function childClock(float $start, array $parent): \Closure
+    {
+        $totalUs = (float) ($parent['duration'] ?? 1_000_000);
+
+        if (isset($parent['action'])) {
+            // Request: children run during the action (controller) phase.
+            $winStartUs = (float) (($parent['bootstrap'] ?? 0)
+                + ($parent['before_middleware'] ?? 0) + ($parent['after_middleware'] ?? 0));
+            $winSpanUs = max(1.0, (float) $parent['action'] * 0.92);
+        } else {
+            // Job / command / etc.: spread across the bulk of the total duration.
+            $winStartUs = $totalUs * 0.06;
+            $winSpanUs = max(1.0, $totalUs * 0.84);
+        }
+
+        return fn (): float => $start
+            + ($winStartUs + (mt_rand(0, 1000) / 1000.0) * $winSpanUs) / 1_000_000.0;
+    }
+
     // ─── Scenarios ─────────────────────────────────────────────
 
     /**
@@ -211,12 +240,16 @@ final class NightwatchSimulator
             'user' => $userId,
         ], $overrides));
 
+        // Spread the child events across the request's controller window so the
+        // detail-page waterfall staggers them along the timeline (not stacked at t=0).
+        $childAt = $this->childClock($now, $records[0]);
+
         // 2-8 queries
         $queryCount = mt_rand(2, 8);
         for ($i = 0; $i < $queryCount; $i++) {
             $records[] = $this->makeQuery([
                 'trace_id' => $this->uuid(),
-                'timestamp' => $now + ($i * 0.001),
+                'timestamp' => $childAt(),
                 'execution_id' => $traceId,
                 'execution_source' => 'request',
                 'user' => $userId,
@@ -228,7 +261,7 @@ final class NightwatchSimulator
         for ($i = 0; $i < $cacheCount; $i++) {
             $records[] = $this->makeCacheEvent([
                 'trace_id' => $this->uuid(),
-                'timestamp' => $now + ($i * 0.0005),
+                'timestamp' => $childAt(),
                 'execution_id' => $traceId,
                 'execution_source' => 'request',
                 'user' => $userId,
@@ -240,19 +273,19 @@ final class NightwatchSimulator
         // realistic feeder still emits standalone ones too, e.g. queued mail).
         if (mt_rand(1, 3) === 1) {
             $records[] = $this->makeMail([
-                'trace_id' => $this->uuid(), 'timestamp' => $now + 0.002,
+                'trace_id' => $this->uuid(), 'timestamp' => $childAt(),
                 'execution_id' => $traceId, 'execution_source' => 'request', 'user' => $userId,
             ]);
         }
         if (mt_rand(1, 4) === 1) {
             $records[] = $this->makeNotification([
-                'trace_id' => $this->uuid(), 'timestamp' => $now + 0.003,
+                'trace_id' => $this->uuid(), 'timestamp' => $childAt(),
                 'execution_id' => $traceId, 'execution_source' => 'request', 'user' => $userId,
             ]);
         }
         if (mt_rand(1, 2) === 1) {
             $records[] = $this->makeOutgoingRequest([
-                'trace_id' => $this->uuid(), 'timestamp' => $now + 0.004,
+                'trace_id' => $this->uuid(), 'timestamp' => $childAt(),
                 'execution_id' => $traceId, 'execution_source' => 'request', 'user' => $userId,
             ]);
         }
@@ -296,19 +329,23 @@ final class NightwatchSimulator
             // would desync from the jittered phases and let a phase exceed the total).
         ], $overrides));
 
+        $childAt = $this->childClock($now, $records[0]);
+
         for ($i = 0; $i < $queryCount; $i++) {
             $records[] = $this->makeQuery([
                 'trace_id' => $this->uuid(),
-                'timestamp' => $now + ($i * 0.001),
+                'timestamp' => $childAt(),
                 'execution_id' => $traceId,
                 'execution_source' => 'request',
                 'user' => $userId,
             ]);
         }
 
+        // The throw + its error log share one instant within the handler window.
+        $failAt = $childAt();
         $records[] = $this->makeException([
             'trace_id' => $this->uuid(),
-            'timestamp' => $now,
+            'timestamp' => $failAt,
             'execution_id' => $traceId,
             'execution_source' => 'request',
             'user' => $userId,
@@ -316,7 +353,7 @@ final class NightwatchSimulator
 
         $records[] = $this->makeLog([
             'trace_id' => $this->uuid(),
-            'timestamp' => $now,
+            'timestamp' => $failAt,
             'execution_id' => $traceId,
             'execution_source' => 'request',
             'level' => 'error',
@@ -377,13 +414,17 @@ final class NightwatchSimulator
         ], $overrides));
         $records[] = $attempt;
 
+        // Spread the attempt's child events across its execution window (relative to the
+        // attempt's own start) so the job-attempt waterfall staggers them, not at t=0.
+        $childAt = $this->childClock($now + 0.01, $attempt);
+
         // Jobs do queries too. A job's child events ran INSIDE the attempt, so they
         // link via execution_id = attempt_id (this is how the job attempt-detail page
         // resolves its timeline — not the dispatch trace_id).
         for ($i = 0; $i < mt_rand(1, 5); $i++) {
             $records[] = $this->makeQuery([
                 'trace_id' => $this->uuid(),
-                'timestamp' => $now + ($i * 0.002),
+                'timestamp' => $childAt(),
                 'execution_id' => $attemptId,
                 'execution_source' => 'job',
                 'user' => $userId,
@@ -393,7 +434,7 @@ final class NightwatchSimulator
         if ($status === 'failed') {
             $records[] = $this->makeException([
                 'trace_id' => $this->uuid(),
-                'timestamp' => $now,
+                'timestamp' => $childAt(),
                 'execution_id' => $attemptId,
                 'execution_source' => 'job',
                 'user' => $userId,
@@ -418,10 +459,12 @@ final class NightwatchSimulator
             'timestamp' => $now,
         ], $overrides));
 
+        $childAt = $this->childClock($now, $records[0]);
+
         for ($i = 0; $i < mt_rand(0, 3); $i++) {
             $records[] = $this->makeQuery([
                 'trace_id' => $this->uuid(),
-                'timestamp' => $now + ($i * 0.001),
+                'timestamp' => $childAt(),
                 'execution_id' => $traceId,
                 'execution_source' => 'command',
             ]);
@@ -444,13 +487,15 @@ final class NightwatchSimulator
             'timestamp' => $now,
         ], $overrides));
 
+        $childAt = $this->childClock($now, $records[0]);
+
         // Scheduled tasks run queries too — link them (execution_source=scheduled_task,
         // execution_id=trace_id, which is how the task-detail page resolves children)
         // so the timeline isn't empty.
         for ($i = 0; $i < mt_rand(1, 4); $i++) {
             $records[] = $this->makeQuery([
                 'trace_id' => $this->uuid(),
-                'timestamp' => $now + ($i * 0.001),
+                'timestamp' => $childAt(),
                 'execution_id' => $traceId,
                 'execution_source' => 'scheduled_task',
             ]);
